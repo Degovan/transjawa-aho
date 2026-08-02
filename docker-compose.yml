@@ -6,8 +6,8 @@ services:
       target: production
     container_name: transjawa-aho
     restart: unless-stopped
-    expose:
-      - "80"
+    ports:
+      - "9004:80"
     env_file:
       - .env
     environment:

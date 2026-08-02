@@ -1,0 +1,23 @@
+{
+  "name": "transjawa-aho",
+  "module": "src/server/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "serve": "bun run src/server/index.ts",
+    "dev": "bun --hot src/server/index.ts",
+    "check": "bun run scripts/check-connection.ts",
+    "dict": "bun run scripts/build-dictionary.ts",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "modern-ahocorasick": "^2.0.4",
+    "mysql2": "^3.23.2"
+  }
+}

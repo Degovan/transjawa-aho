@@ -6,12 +6,12 @@ services:
       target: production
     container_name: transjawa-aho
     restart: unless-stopped
-    ports:
-      - "3001:3001"
+    expose:
+      - "80"
     env_file:
       - .env
     environment:
-      - PORT=3001
+      - PORT=80
     networks:
       - transjawa-network
 

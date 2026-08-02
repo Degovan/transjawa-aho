@@ -15,5 +15,5 @@ COPY --from=build /app/src ./src
 COPY --from=build /app/package.json ./
 
 ENV NODE_ENV=production
-EXPOSE 3001
+EXPOSE 80
 CMD ["bun", "run", "serve"]

@@ -1,6 +1,7 @@
 import type { Dictionary, Level, VocabEntry } from "../dictionary/types";
 import { LEVELS } from "../dictionary/types";
 import { AhoCorasick } from "./aho-corasick";
+import { analyzeSuffix, applySuffix, type SuffixRule } from "./affixes";
 import { tokenize, type Token } from "./tokenizer";
 
 /** "jv-id" (default): Javanese -> Indonesian. "id-jv": Indonesian -> Javanese. */
@@ -37,6 +38,17 @@ export interface TranslationMatch {
   /** char offsets in the original input */
   start: number;
   end: number;
+  /**
+   * Set when the match came from stripping an affix off the input token. The
+   * dictionary matched `stem` only; `translation` already includes the
+   * re-attached Javanese affix.
+   */
+  affix?: {
+    /** Indonesian suffix removed from the input, e.g. "nya" */
+    suffix: string;
+    /** the bare Indonesian stem that was looked up */
+    stem: string;
+  };
 }
 
 /**
@@ -101,6 +113,12 @@ function javaneseSynonyms(
 export class Translator {
   private ac = new AhoCorasick<{ entry: VocabEntry; level: Level }>();
   private reverseAc = new AhoCorasick<{ entry: VocabEntry }>();
+  /**
+   * Single-word Indonesian patterns -> entries sharing that meaning. Used to
+   * verify an affix-stripped stem is a real dictionary word before accepting
+   * the split, and to translate it without re-running the automaton.
+   */
+  private reverseStems = new Map<string, VocabEntry[]>();
 
   constructor(dict: Dictionary) {
     for (const p of dict.patterns) {
@@ -112,6 +130,13 @@ export class Translator {
     for (const p of dict.reversePatterns ?? []) {
       const tokens = p.pattern.split(" ");
       this.reverseAc.add(tokens, { entry: p.entry });
+
+      // Affix stripping only ever produces a single-word stem.
+      if (tokens.length === 1) {
+        const bucket = this.reverseStems.get(p.pattern);
+        if (bucket) bucket.push(p.entry);
+        else this.reverseStems.set(p.pattern, [p.entry]);
+      }
     }
     this.reverseAc.build();
   }
@@ -166,6 +191,7 @@ export class Translator {
     raw.sort((a, b) => a.start - b.start || b.length - a.length);
 
     const chosen: TranslationMatch[] = [];
+    const covered = new Set<number>();
     let consumedUntil = -1;
     for (const m of raw) {
       if (m.start <= consumedUntil) continue;
@@ -197,14 +223,67 @@ export class Translator {
         start: startTok.start,
         end: endTok.end,
       });
+      for (let i = m.start; i <= m.end; i++) covered.add(i);
       consumedUntil = m.end;
     }
+
+    // Second pass: tokens the dictionary could not match as-is may still be an
+    // inflected form ("agamanya"). Strip the affix, translate the bare stem,
+    // then re-attach the Javanese affix for this level.
+    for (let i = 0; i < tokens.length; i++) {
+      if (covered.has(i)) continue;
+      const tok = tokens[i]!;
+      const affixMatch = this.matchWithAffix(tok, level);
+      if (affixMatch) chosen.push(affixMatch);
+    }
+
+    // rebuild()/segment() walk matches left to right, so restore input order.
+    chosen.sort((a, b) => a.start - b.start);
 
     return {
       input: text,
       output: this.rebuild(text, chosen),
       matches: chosen,
       tokens: this.segment(text, chosen),
+    };
+  }
+
+  /**
+   * Try to translate a single inflected token by splitting off a known affix.
+   * Returns null when the token has no recognizable affix, when the leftover
+   * stem is not in the dictionary, or when the affix has no form at `level`.
+   */
+  private matchWithAffix(tok: Token, level: Level): TranslationMatch | null {
+    const analysis = analyzeSuffix(tok.norm, (stem) => this.reverseStems.has(stem));
+    if (!analysis) return null;
+
+    const entries = this.reverseStems.get(analysis.stem);
+    if (!entries || entries.length === 0) return null;
+
+    const { value: stemTranslation, level: resolvedLevel } = resolveLevel(
+      entries[0]!.levels,
+      level
+    );
+    if (stemTranslation === null) return null;
+
+    const translation = applySuffix(stemTranslation, analysis.rule, resolvedLevel);
+    // No suffix form in this register (e.g. krama has no bound "-ku").
+    if (translation === null) return null;
+
+    const meanings = javaneseSynonyms(entries, resolvedLevel, stemTranslation)
+      .map((form) => applySuffix(form, analysis.rule, resolvedLevel))
+      .filter((form): form is string => form !== null);
+
+    return {
+      source: tok.raw,
+      translation,
+      meanings,
+      level: resolvedLevel,
+      type: entries[0]!.type,
+      vocabularyId: entries[0]!.vocabularyId,
+      start: tok.start,
+      end: tok.end,
+      affix: { suffix: analysis.rule.suffix, stem: analysis.stem },
     };
   }
 

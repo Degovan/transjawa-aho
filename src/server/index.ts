@@ -21,16 +21,39 @@ const server = Bun.serve({
 
     "/translate": {
       POST: async (req) => {
-        let body: { text?: unknown };
+        let body: { text?: unknown; direction?: unknown; level?: unknown };
         try {
-          body = (await req.json()) as { text?: unknown };
+          body = (await req.json()) as typeof body;
         } catch {
           return json({ error: "Invalid JSON body" }, 400);
         }
         if (typeof body.text !== "string") {
           return json({ error: "Field 'text' (string) is required" }, 400);
         }
-        return json(translatorStore.get().translate(body.text));
+
+        let direction: "jv-id" | "id-jv" = "jv-id";
+        if (body.direction !== undefined) {
+          if (body.direction !== "jv-id" && body.direction !== "id-jv") {
+            return json(
+              { error: "Field 'direction' must be one of: jv-id, id-jv" },
+              400
+            );
+          }
+          direction = body.direction;
+        }
+
+        let level: "ngoko" | "krama" | "inggil" = "ngoko";
+        if (body.level !== undefined) {
+          if (body.level !== "ngoko" && body.level !== "krama" && body.level !== "inggil") {
+            return json(
+              { error: "Field 'level' must be one of: ngoko, krama, inggil" },
+              400
+            );
+          }
+          level = body.level;
+        }
+
+        return json(translatorStore.get().translate(body.text, { direction, level }));
       },
     },
 

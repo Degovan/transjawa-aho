@@ -1,7 +1,13 @@
-import type { Dictionary, DictPattern, Level, MeaningRow, VocabEntry, VocabRow } from "./types";
+import type {
+  Dictionary,
+  DictPattern,
+  MeaningRow,
+  ReversePattern,
+  VocabEntry,
+  VocabRow,
+} from "./types";
+import { LEVELS } from "./types";
 import { normalize } from "./normalize";
-
-const LEVELS: Level[] = ["ngoko", "krama", "inggil"];
 
 /**
  * Pure transform: turn raw DB rows into a Dictionary. No I/O here so it can be
@@ -28,6 +34,9 @@ export function buildDictionaryFromRows(
   // One pattern per distinct surface form per entry. If two levels share the
   // same word (e.g. krama == inggil), collapse into a single pattern.
   const patterns: DictPattern[] = [];
+  // Reverse direction: one pattern per distinct meaning surface form per
+  // entry, so target-language text can be matched back to the Javanese entry.
+  const reversePatterns: ReversePattern[] = [];
   for (const entry of entries.values()) {
     const seen = new Set<string>();
     for (const level of LEVELS) {
@@ -38,7 +47,15 @@ export function buildDictionaryFromRows(
       seen.add(pattern);
       patterns.push({ pattern, level, entry });
     }
+
+    const seenMeanings = new Set<string>();
+    for (const raw of entry.meanings) {
+      const pattern = normalize(raw);
+      if (!pattern || seenMeanings.has(pattern)) continue;
+      seenMeanings.add(pattern);
+      reversePatterns.push({ pattern, entry });
+    }
   }
 
-  return { patterns };
+  return { patterns, reversePatterns };
 }

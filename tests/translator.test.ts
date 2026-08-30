@@ -20,6 +20,11 @@ const dict: Dictionary = {
     { pattern: "sega abang", level: "ngoko", entry: nasiPhrase },
     { pattern: "sekul abrit", level: "krama", entry: nasiPhrase },
   ],
+  reversePatterns: [
+    { pattern: "merah", entry: abang },
+    { pattern: "menanak nasi", entry: adang },
+    { pattern: "nasi merah", entry: nasiPhrase },
+  ],
 };
 
 test("translates a single word and replaces it in output", () => {
@@ -90,4 +95,82 @@ test("tokens expose full meanings for a multi-meaning entry via match", () => {
   const matched = res.tokens.find((tok) => tok.match !== null)!;
   expect(matched.match!.meanings).toEqual(["arahan", "instruksi", "kode"]);
   expect(matched.match!.translation).toBe("arahan");
+});
+
+// --- id -> jv (reverse direction) ---
+
+test("id-jv: translates a single word to the requested level", () => {
+  const t = new Translator(dict);
+  const res = t.translate("bajuku merah", { direction: "id-jv", level: "krama" });
+  expect(res.matches).toHaveLength(1);
+  expect(res.matches[0]!.source).toBe("merah");
+  expect(res.matches[0]!.translation).toBe("abrit");
+  expect(res.matches[0]!.level).toBe("krama");
+  expect(res.output).toBe("bajuku abrit");
+});
+
+test("id-jv: meanings are Javanese, not the Indonesian source", () => {
+  const t = new Translator(dict);
+  const res = t.translate("merah", { direction: "id-jv", level: "ngoko" });
+  expect(res.matches[0]!.meanings).toEqual(["abang"]);
+  expect(res.matches[0]!.meanings).not.toContain("merah");
+});
+
+test("id-jv: meanings never mix levels — only forms at the requested level", () => {
+  // aba (ngoko) / titah (krama) is one entry; dhawuh/dhawuh is a synonym entry.
+  const aba = entry(10, { ngoko: "aba", krama: "titah", inggil: "titah" }, ["perintah"]);
+  const dhawuh = entry(11, { ngoko: "dhawuh", krama: "dhawuh", inggil: "dhawuh" }, ["perintah"]);
+  const t = new Translator({
+    patterns: [],
+    reversePatterns: [
+      { pattern: "perintah", entry: aba },
+      { pattern: "perintah", entry: dhawuh },
+    ],
+  });
+
+  const krama = t.translate("perintah", { direction: "id-jv", level: "krama" });
+  expect(krama.matches[0]!.translation).toBe("titah");
+  // must NOT contain the ngoko form "aba"
+  expect(krama.matches[0]!.meanings).toEqual(["titah", "dhawuh"]);
+  expect(krama.matches[0]!.meanings).not.toContain("aba");
+
+  const ngoko = t.translate("perintah", { direction: "id-jv", level: "ngoko" });
+  expect(ngoko.matches[0]!.translation).toBe("aba");
+  expect(ngoko.matches[0]!.meanings).toEqual(["aba", "dhawuh"]);
+  expect(ngoko.matches[0]!.meanings).not.toContain("titah");
+});
+
+test("id-jv: defaults to ngoko level when none is specified", () => {
+  const t = new Translator(dict);
+  const res = t.translate("merah", { direction: "id-jv" });
+  expect(res.matches[0]!.translation).toBe("abang");
+  expect(res.matches[0]!.level).toBe("ngoko");
+});
+
+test("id-jv: prefers the longest match on overlap (phrase over word)", () => {
+  const t = new Translator(dict);
+  const res = t.translate("aku mangan nasi merah esuk", { direction: "id-jv", level: "ngoko" });
+  expect(res.matches).toHaveLength(1);
+  expect(res.matches[0]!.source).toBe("nasi merah");
+  expect(res.matches[0]!.translation).toBe("sega abang");
+  expect(res.output).toBe("aku mangan sega abang esuk");
+});
+
+test("id-jv: falls back to another level when the requested one is empty in the DB", () => {
+  const partial = entry(8, { ngoko: "turu", krama: "", inggil: "sare" }, ["tidur"]);
+  const t = new Translator({
+    patterns: [{ pattern: "turu", level: "ngoko", entry: partial }],
+    reversePatterns: [{ pattern: "tidur", entry: partial }],
+  });
+  const res = t.translate("tidur", { direction: "id-jv", level: "krama" });
+  expect(res.matches[0]!.translation).toBe("turu");
+  expect(res.matches[0]!.level).toBe("ngoko");
+  // fell back to ngoko; no synonym entries, so only the resolved form
+  expect(res.matches[0]!.meanings).toEqual(["turu"]);
+});
+
+test("id-jv: jv-id direction is still the default when options are omitted", () => {
+  const t = new Translator(dict);
+  const res = t.translate("abang");
+  expect(res.matches[0]!.translation).toBe("merah");
 });

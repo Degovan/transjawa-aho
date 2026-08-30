@@ -1,14 +1,36 @@
 import type { Dictionary, Level, VocabEntry } from "../dictionary/types";
+import { LEVELS } from "../dictionary/types";
 import { AhoCorasick } from "./aho-corasick";
 import { tokenize, type Token } from "./tokenizer";
 
+/** "jv-id" (default): Javanese -> Indonesian. "id-jv": Indonesian -> Javanese. */
+export type Direction = "jv-id" | "id-jv";
+
+export interface TranslateOptions {
+  direction?: Direction;
+  /** Javanese level to render for "id-jv". Ignored for "jv-id". Defaults to "ngoko". */
+  level?: Level;
+}
+
 export interface TranslationMatch {
-  /** original Javanese surface text as it appeared in the input */
+  /** original surface text as it appeared in the input */
   source: string;
-  /** chosen Indonesian meaning (first / primary) */
+  /** chosen translation: primary Indonesian meaning ("jv-id"), or the
+   * Javanese surface form for the resolved level ("id-jv") */
   translation: string;
-  /** all available Indonesian meanings for this entry */
+  /**
+   * Alternatives in the *output* language, `translation` first:
+   * - "jv-id": all available Indonesian meanings for this entry.
+   * - "id-jv": Javanese synonyms from other vocabulary entries sharing the
+   *   matched Indonesian meaning, all rendered at `level` so the list never
+   *   mixes registers.
+   */
   meanings: string[];
+  /**
+   * For "jv-id": which Javanese level the matched surface form came from.
+   * For "id-jv": which Javanese level `translation` was actually rendered in
+   * (may differ from the requested level if that level is empty in the DB).
+   */
   level: Level;
   type: string | null;
   vocabularyId: number;
@@ -37,8 +59,48 @@ export interface TranslateResult {
   tokens: OutputToken[];
 }
 
+/**
+ * Resolve which Javanese level to render. If the requested level is empty in
+ * the DB, fall back through ngoko -> krama -> inggil (in that priority) so we
+ * never emit an empty string when at least one level is populated.
+ */
+function resolveLevel(
+  levels: Record<Level, string>,
+  requested: Level
+): { value: string | null; level: Level } {
+  if (levels[requested]) return { value: levels[requested], level: requested };
+  for (const fallback of LEVELS) {
+    if (levels[fallback]) return { value: levels[fallback], level: fallback };
+  }
+  return { value: null, level: requested };
+}
+
+/**
+ * Javanese synonyms for one span, all rendered at the SAME level so the list
+ * never mixes registers (e.g. never offers ngoko "aba" alongside krama
+ * "titah"). Alternatives come from other vocabulary entries that share the
+ * matched Indonesian meaning, not from the other levels of one entry.
+ * `primary` stays first so it matches `translation`.
+ */
+function javaneseSynonyms(
+  entries: VocabEntry[],
+  level: Level,
+  primary: string
+): string[] {
+  const seen = new Set<string>([primary]);
+  const out = [primary];
+  for (const entry of entries) {
+    const form = entry.levels[level];
+    if (!form || seen.has(form)) continue;
+    seen.add(form);
+    out.push(form);
+  }
+  return out;
+}
+
 export class Translator {
   private ac = new AhoCorasick<{ entry: VocabEntry; level: Level }>();
+  private reverseAc = new AhoCorasick<{ entry: VocabEntry }>();
 
   constructor(dict: Dictionary) {
     for (const p of dict.patterns) {
@@ -46,9 +108,22 @@ export class Translator {
       this.ac.add(tokens, { entry: p.entry, level: p.level });
     }
     this.ac.build();
+
+    for (const p of dict.reversePatterns ?? []) {
+      const tokens = p.pattern.split(" ");
+      this.reverseAc.add(tokens, { entry: p.entry });
+    }
+    this.reverseAc.build();
   }
 
-  translate(text: string): TranslateResult {
+  translate(text: string, options: TranslateOptions = {}): TranslateResult {
+    const direction = options.direction ?? "jv-id";
+    return direction === "id-jv"
+      ? this.translateIdToJv(text, options.level ?? "ngoko")
+      : this.translateJvToId(text);
+  }
+
+  private translateJvToId(text: string): TranslateResult {
     const tokens = tokenize(text);
     const raw = this.ac.search(tokens.map((t) => t.norm));
 
@@ -68,6 +143,55 @@ export class Translator {
         translation: meanings[0] ?? text.slice(startTok.start, endTok.end),
         meanings,
         level: m.payload.level,
+        type: m.payload.entry.type,
+        vocabularyId: m.payload.entry.vocabularyId,
+        start: startTok.start,
+        end: endTok.end,
+      });
+      consumedUntil = m.end;
+    }
+
+    return {
+      input: text,
+      output: this.rebuild(text, chosen),
+      matches: chosen,
+      tokens: this.segment(text, chosen),
+    };
+  }
+
+  private translateIdToJv(text: string, level: Level): TranslateResult {
+    const tokens = tokenize(text);
+    const raw = this.reverseAc.search(tokens.map((t) => t.norm));
+
+    raw.sort((a, b) => a.start - b.start || b.length - a.length);
+
+    const chosen: TranslationMatch[] = [];
+    let consumedUntil = -1;
+    for (const m of raw) {
+      if (m.start <= consumedUntil) continue;
+      const startTok = tokens[m.start]!;
+      const endTok = tokens[m.end]!;
+      const source = text.slice(startTok.start, endTok.end);
+      const { value: translation, level: resolvedLevel } = resolveLevel(
+        m.payload.entry.levels,
+        level
+      );
+      const finalTranslation = translation ?? source;
+
+      // Other vocabulary entries matching this exact same span are synonyms.
+      // Render them at `resolvedLevel` so the list stays in one register.
+      const synonymEntries = raw
+        .filter((o) => o.start === m.start && o.end === m.end)
+        .map((o) => o.payload.entry);
+
+      chosen.push({
+        source,
+        translation: finalTranslation,
+        meanings:
+          translation === null
+            ? [finalTranslation]
+            : javaneseSynonyms(synonymEntries, resolvedLevel, translation),
+        level: resolvedLevel,
         type: m.payload.entry.type,
         vocabularyId: m.payload.entry.vocabularyId,
         start: startTok.start,

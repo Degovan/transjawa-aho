@@ -11,8 +11,9 @@ Laravel  --POST /translate {"text": "..."}-->  transjawa-aho  -->  JSON hasil
 Yang bisa dilakukan:
 
 - Jawa → Indonesia, dan Indonesia → Jawa dengan pilihan tingkatan (`ngoko`, `krama`, `inggil`).
-- Matching per kata, jadi `abang` tidak salah cocok di dalam `sembarang`, dan frasa multi-kata (`sega abang` → `nasi merah`) dicocokkan sebagai satu unit.
-- Kata berimbuhan ikut tertangani: `agamanya` → `agamane` (ngoko) / `agaminipun` (krama), `agamaku` → `agamaku` (ngoko) / `agaminipun kula` (krama).
+- Matching per kata, jadi `abang` tidak salah cocok di dalam `sembarang`, dan frasa multi-kata (`sega abang` → `nasi merah`) dicocokkan sebagai satu unit — termasuk saat berimbuhan (`anak keduaku` → `anak nomer loroku`).
+- Kata berimbuhan tertangani di kedua arah: `agamanya` → `agamane` (ngoko) / `agaminipun kula` untuk `agamaku` (krama), dan sebaliknya `agaminipun kula` → `agamaku`.
+- Kata berawalan juga: `menulis` → `nulis` (ngoko) / `nyerat` (krama), dan sebaliknya. Kamus selalu diperiksa dulu, jadi entry yang sudah tersimpan berawalan tidak tertimpa hasil rekonstruksi.
 - Tiap hasil membawa daftar alternatif terjemahan, siap dipakai sebagai dropdown pilihan di frontend.
 
 ## Setup
@@ -127,5 +128,6 @@ TRANSJAWA_AHO_URL=http://127.0.0.1:3001
 | Dokumen | Isi |
 |---|---|
 | [docs/api.md](docs/api.md) | Referensi endpoint: semua field request/response, isi `meanings` per arah, fallback tingkatan. |
-| [docs/imbuhan.md](docs/imbuhan.md) | Penanganan kata berimbuhan pada arah `id-jv`, cara menambah rule imbuhan baru. |
-| [docs/arsitektur.md](docs/arsitektur.md) | Struktur internal: pembangunan kamus, matching token-based, caching, dependency. |
+| [docs/imbuhan.md](docs/imbuhan.md) | Imbuhan akhir (`-nya`, `-ku`, `-mu`) di kedua arah, deteksi tingkatan dari bentuk imbuhan, cara menambah rule baru. |
+| [docs/awalan.md](docs/awalan.md) | Awalan `meN-` dan `ater-ater anuswara`, aturan peluluhan, kenapa arah balik ambigu, batasan yang ada. |
+| [docs/arsitektur.md](docs/arsitektur.md) | Struktur internal: pembangunan kamus, matching token-based, caching, angka performa, dependency. |

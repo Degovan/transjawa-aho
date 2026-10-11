@@ -1,4 +1,5 @@
 import type { Level } from "../dictionary/types";
+import { LEVELS } from "../dictionary/types";
 
 /**
  * Affix rules for Indonesian -> Javanese.
@@ -110,6 +111,110 @@ export interface SuffixAnalysis {
 }
 
 const VOWELS = new Set(["a", "e", "i", "o", "u"]);
+
+/**
+ * One Javanese affix form, flattened for the jv -> id direction.
+ *
+ * Going Javanese -> Indonesian is not a mirror of the other direction: the
+ * caller does not say which level the input is in, so the level has to be
+ * inferred from the affix form itself. "agamane" implies ngoko, "agaminipun
+ * kula" implies krama. These entries are derived from SUFFIX_RULES so the rule
+ * table stays the single source of truth.
+ */
+interface JavaneseAffixForm {
+  /** the Javanese affix as it appears in input, e.g. "ne" or "nipun kula" */
+  form: string;
+  /** how many whitespace-separated words the form spans (1 or more) */
+  wordCount: number;
+  /** Indonesian suffix to restore, e.g. "nya" */
+  indonesianSuffix: string;
+  /** level this form reveals about the input */
+  level: Level;
+}
+
+/**
+ * Every Javanese affix form, longest first so "nipun kula" is tried before
+ * "nipun" and the greediest valid split wins.
+ */
+const JAVANESE_AFFIX_FORMS: JavaneseAffixForm[] = SUFFIX_RULES.flatMap((rule) =>
+  LEVELS.flatMap((level) => {
+    const affix = rule.javanese[level];
+    if (!affix) return [];
+    // afterVowel/afterConsonant often differ only by a leading "n"; both are
+    // valid input forms, so index each distinct one.
+    return [...new Set([affix.afterVowel, affix.afterConsonant])].map((form) => ({
+      form,
+      wordCount: form.trim().split(/\s+/).length,
+      indonesianSuffix: rule.suffix,
+      level,
+    }));
+  })
+).sort((a, b) => b.form.length - a.form.length);
+
+/**
+ * How many words beyond the affixed token the longest affix form can reach.
+ * "nipun kula" spans two words, so it needs one word of lookahead. Derived from
+ * the rules so callers never have to hardcode it — and so the jv -> id pass can
+ * bound its lookahead instead of slicing the rest of the input per token.
+ */
+export const MAX_AFFIX_LOOKAHEAD = Math.max(
+  0,
+  ...JAVANESE_AFFIX_FORMS.map((f) => f.wordCount - 1)
+);
+
+export interface JavaneseSuffixAnalysis {
+  /** bare Javanese stem to look up in the dictionary */
+  stem: string;
+  /** Indonesian suffix to append to the translated stem */
+  indonesianSuffix: string;
+  /** level inferred from the affix form */
+  level: Level;
+  /** Javanese affix that was stripped */
+  javaneseAffix: string;
+  /**
+   * How many input tokens the whole match covers. 1 for a bound suffix like
+   * "-ne"; 2 for "…nipun kula" where the pronoun is a separate word.
+   */
+  tokenSpan: number;
+}
+
+/**
+ * Strip a Javanese affix off `token`, optionally consuming following words when
+ * the affix form is multi-word ("nipun kula"). `nextWords` supplies the
+ * normalized tokens after `token`; `isKnownStem` confirms the leftover stem is
+ * a real dictionary entry.
+ *
+ * Returns null when nothing matches.
+ */
+export function analyzeJavaneseSuffix(
+  token: string,
+  nextWords: string[],
+  isKnownStem: (stem: string) => boolean
+): JavaneseSuffixAnalysis | null {
+  for (const entry of JAVANESE_AFFIX_FORMS) {
+    const words = entry.form.trim().split(/\s+/);
+    const bound = words[0]!;
+
+    // The first word carries the bound part; the rest must match what follows.
+    if (!token.endsWith(bound)) continue;
+    const trailing = words.slice(1);
+    if (trailing.length > nextWords.length) continue;
+    if (trailing.some((w, i) => nextWords[i] !== w)) continue;
+
+    const stem = token.slice(0, token.length - bound.length);
+    if (stem.length < 2) continue;
+    if (!isKnownStem(stem)) continue;
+
+    return {
+      stem,
+      indonesianSuffix: entry.indonesianSuffix,
+      level: entry.level,
+      javaneseAffix: entry.form,
+      tokenSpan: 1 + trailing.length,
+    };
+  }
+  return null;
+}
 
 /**
  * Split one token into stem + suffix, but only when `isKnownStem` confirms the

@@ -97,6 +97,99 @@ test("tokens expose full meanings for a multi-meaning entry via match", () => {
   expect(matched.match!.translation).toBe("arahan");
 });
 
+// --- jv -> id affix handling ---
+
+const agamaEntry = entry(30, { ngoko: "agama", krama: "agami", inggil: "agami" }, ["agama"]);
+const omahEntry = entry(31, { ngoko: "omah", krama: "griya", inggil: "dalem" }, ["rumah"]);
+
+/** Dictionary carrying both directions for the same entries. */
+const bothWays: Dictionary = {
+  patterns: [
+    { pattern: "agama", level: "ngoko", entry: agamaEntry },
+    { pattern: "agami", level: "krama", entry: agamaEntry },
+    { pattern: "omah", level: "ngoko", entry: omahEntry },
+    { pattern: "griya", level: "krama", entry: omahEntry },
+    { pattern: "dalem", level: "inggil", entry: omahEntry },
+    { pattern: "abang", level: "ngoko", entry: abang },
+    { pattern: "abrit", level: "krama", entry: abang },
+  ],
+  reversePatterns: [
+    { pattern: "agama", entry: agamaEntry },
+    { pattern: "rumah", entry: omahEntry },
+    { pattern: "merah", entry: abang },
+  ],
+};
+
+test("jv-id: reads a bound ngoko suffix and restores the Indonesian one", () => {
+  const t = new Translator(bothWays);
+  const res = t.translate("agamane");
+  expect(res.matches).toHaveLength(1);
+  expect(res.matches[0]!.translation).toBe("agamanya");
+  expect(res.matches[0]!.affix).toEqual({ suffix: "ne", stem: "agama" });
+  expect(res.output).toBe("agamanya");
+});
+
+test("jv-id: infers the level from the affix form", () => {
+  const t = new Translator(bothWays);
+  expect(t.translate("agamane").matches[0]!.level).toBe("ngoko");
+  expect(t.translate("agaminipun").matches[0]!.level).toBe("krama");
+});
+
+test("jv-id: consumes the free pronoun of a multi-word affix", () => {
+  const t = new Translator(bothWays);
+
+  const kula = t.translate("agaminipun kula");
+  expect(kula.matches).toHaveLength(1);
+  expect(kula.matches[0]!.source).toBe("agaminipun kula");
+  expect(kula.matches[0]!.translation).toBe("agamaku");
+  expect(kula.output).toBe("agamaku");
+
+  // sampeyan marks krama, panjenengan marks inggil; both map back to "-mu"
+  expect(t.translate("agaminipun sampeyan").output).toBe("agamamu");
+  expect(t.translate("agaminipun sampeyan").matches[0]!.level).toBe("krama");
+  expect(t.translate("agaminipun panjenengan").output).toBe("agamamu");
+  expect(t.translate("agaminipun panjenengan").matches[0]!.level).toBe("inggil");
+});
+
+test("jv-id: handles the -e / -ipun allomorphs on consonant-final stems", () => {
+  const t = new Translator(bothWays);
+  expect(t.translate("omahe").output).toBe("rumahnya");
+  expect(t.translate("griyanipun kula").output).toBe("rumahku");
+  expect(t.translate("dalemipun panjenengan").output).toBe("rumahmu");
+});
+
+test("jv-id: mixes plain and affixed matches, staying lossless", () => {
+  const t = new Translator(bothWays);
+  const res = t.translate("Omahe abang.");
+  expect(res.output).toBe("rumahnya merah.");
+  expect(res.tokens.map((tok) => tok.text).join("")).toBe("Omahe abang.");
+});
+
+test("jv-id: exact dictionary match still wins over affix stripping", () => {
+  // "dalem" is a real entry; it must not be read as "dal" + "em"
+  const t = new Translator(bothWays);
+  const res = t.translate("dalem");
+  expect(res.matches[0]!.translation).toBe("rumah");
+  expect(res.matches[0]!.affix).toBeUndefined();
+});
+
+test("jv-id: leaves unknown stems alone", () => {
+  const t = new Translator(bothWays);
+  const res = t.translate("kursine");
+  expect(res.matches).toHaveLength(0);
+  expect(res.output).toBe("kursine");
+});
+
+test("round trip id -> jv -> id returns the original for every level", () => {
+  const t = new Translator(bothWays);
+  for (const level of ["ngoko", "krama", "inggil"] as const) {
+    for (const src of ["agamanya", "agamaku", "agamamu", "rumahnya"]) {
+      const jv = t.translate(src, { direction: "id-jv", level }).output;
+      expect(t.translate(jv).output).toBe(src);
+    }
+  }
+});
+
 // --- id -> jv (reverse direction) ---
 
 test("id-jv: translates a single word to the requested level", () => {
@@ -312,4 +405,224 @@ test("id-jv: jv-id direction is still the default when options are omitted", () 
   const t = new Translator(dict);
   const res = t.translate("abang");
   expect(res.matches[0]!.translation).toBe("merah");
+});
+
+// --- affixes on multi-word vocabulary ---
+
+const anakKedua = entry(
+  40,
+  { ngoko: "anak nomer loro", krama: "putra nomer kalih", inggil: "putra nomer kalih" },
+  ["anak kedua"]
+);
+
+const phraseDict: Dictionary = {
+  patterns: [
+    { pattern: "anak nomer loro", level: "ngoko", entry: anakKedua },
+    { pattern: "putra nomer kalih", level: "krama", entry: anakKedua },
+    { pattern: "abang", level: "ngoko", entry: abang },
+    { pattern: "abrit", level: "krama", entry: abang },
+  ],
+  reversePatterns: [
+    { pattern: "anak kedua", entry: anakKedua },
+    { pattern: "merah", entry: abang },
+  ],
+};
+
+test("id-jv: attaches a suffix to a multi-word entry", () => {
+  const t = new Translator(phraseDict);
+
+  const ngoko = t.translate("anak keduaku", { direction: "id-jv", level: "ngoko" });
+  expect(ngoko.matches).toHaveLength(1);
+  expect(ngoko.matches[0]!.source).toBe("anak keduaku");
+  expect(ngoko.matches[0]!.translation).toBe("anak nomer loroku");
+  expect(ngoko.matches[0]!.affix).toEqual({ suffix: "ku", stem: "anak kedua" });
+  expect(ngoko.output).toBe("anak nomer loroku");
+
+  const krama = t.translate("anak keduaku", { direction: "id-jv", level: "krama" });
+  expect(krama.output).toBe("putra nomer kalihipun kula");
+});
+
+test("id-jv: multi-word entry works for every suffix", () => {
+  const t = new Translator(phraseDict);
+  const at = (text: string, level: "ngoko" | "krama") =>
+    t.translate(text, { direction: "id-jv", level }).output;
+
+  expect(at("anak keduanya", "ngoko")).toBe("anak nomer lorone");
+  expect(at("anak keduamu", "ngoko")).toBe("anak nomer loromu");
+  expect(at("anak keduanya", "krama")).toBe("putra nomer kalihipun");
+  expect(at("anak keduamu", "krama")).toBe("putra nomer kalihipun sampeyan");
+});
+
+test("id-jv: affixed phrase coexists with other matches in one sentence", () => {
+  const t = new Translator(phraseDict);
+  const res = t.translate("anak keduaku merah", { direction: "id-jv", level: "ngoko" });
+  expect(res.matches).toHaveLength(2);
+  expect(res.output).toBe("anak nomer loroku abang");
+  expect(res.tokens.map((tok) => tok.text).join("")).toBe("anak keduaku merah");
+});
+
+test("id-jv: bare multi-word entry still matches without any affix", () => {
+  const t = new Translator(phraseDict);
+  const res = t.translate("anak kedua", { direction: "id-jv", level: "ngoko" });
+  expect(res.matches[0]!.affix).toBeUndefined();
+  expect(res.output).toBe("anak nomer loro");
+});
+
+test("jv-id: reads a suffix off a multi-word entry", () => {
+  const t = new Translator(phraseDict);
+
+  const ne = t.translate("anak nomer lorone");
+  expect(ne.matches).toHaveLength(1);
+  expect(ne.matches[0]!.source).toBe("anak nomer lorone");
+  expect(ne.matches[0]!.translation).toBe("anak keduanya");
+  expect(ne.matches[0]!.affix).toEqual({ suffix: "ne", stem: "anak nomer loro" });
+
+  expect(t.translate("anak nomer loroku").output).toBe("anak keduaku");
+  expect(t.translate("putra nomer kalihipun").output).toBe("anak keduanya");
+  // multi-word affix on a multi-word entry
+  expect(t.translate("putra nomer kalihipun kula").output).toBe("anak keduaku");
+});
+
+test("jv-id: affixed phrase coexists with other matches", () => {
+  const t = new Translator(phraseDict);
+  const res = t.translate("anak nomer lorone abang");
+  expect(res.matches).toHaveLength(2);
+  expect(res.output).toBe("anak keduanya merah");
+});
+
+test("round trip works for multi-word entries", () => {
+  const t = new Translator(phraseDict);
+  for (const level of ["ngoko", "krama"] as const) {
+    for (const src of ["anak keduanya", "anak keduaku", "anak keduamu"]) {
+      const jv = t.translate(src, { direction: "id-jv", level }).output;
+      expect(t.translate(jv).output).toBe(src);
+    }
+  }
+});
+
+test("phrase affix does not steal a token already used by another match", () => {
+  // "merah" is matched on its own, so it cannot become the lead word of a phrase
+  const t = new Translator(phraseDict);
+  const res = t.translate("merah anak keduaku", { direction: "id-jv", level: "ngoko" });
+  expect(res.output).toBe("abang anak nomer loroku");
+  expect(res.matches).toHaveLength(2);
+});
+
+test("longest phrase wins when several candidates share a final word", () => {
+  const kedua = entry(41, { ngoko: "loro", krama: "kalih", inggil: "kalih" }, ["kedua"]);
+  const t = new Translator({
+    patterns: [{ pattern: "loro", level: "ngoko", entry: kedua }],
+    reversePatterns: [
+      { pattern: "kedua", entry: kedua },
+      { pattern: "anak kedua", entry: anakKedua },
+    ],
+  });
+  // "anak keduaku" must use the two-word entry, not just "kedua"
+  expect(t.translate("anak keduaku", { direction: "id-jv", level: "ngoko" }).output).toBe(
+    "anak nomer loroku"
+  );
+  // standalone "keduaku" falls back to the single-word entry
+  expect(t.translate("keduaku", { direction: "id-jv", level: "ngoko" }).output).toBe("loroku");
+});
+
+// --- verbal prefixes (meN- / ater-ater) ---
+
+const tulis = entry(50, { ngoko: "tulis", krama: "serat", inggil: "serat" }, ["tulis"]);
+
+const prefixDict: Dictionary = {
+  patterns: [
+    { pattern: "tulis", level: "ngoko", entry: tulis },
+    { pattern: "serat", level: "krama", entry: tulis },
+    { pattern: "abang", level: "ngoko", entry: abang },
+  ],
+  reversePatterns: [
+    { pattern: "tulis", entry: tulis },
+    { pattern: "merah", entry: abang },
+  ],
+};
+
+test("id-jv: reconstructs a meN- stem and applies the Javanese prefix", () => {
+  const t = new Translator(prefixDict);
+
+  const ngoko = t.translate("menulis", { direction: "id-jv", level: "ngoko" });
+  expect(ngoko.matches).toHaveLength(1);
+  expect(ngoko.matches[0]!.translation).toBe("nulis");
+  expect(ngoko.matches[0]!.prefix).toEqual({ prefix: "men", stem: "tulis" });
+  expect(ngoko.output).toBe("nulis");
+
+  // krama stem "serat" takes ny- -> nyerat
+  expect(t.translate("menulis", { direction: "id-jv", level: "krama" }).output).toBe("nyerat");
+});
+
+test("jv-id: reconstructs an ater-ater stem and applies meN-", () => {
+  const t = new Translator(prefixDict);
+
+  const res = t.translate("nulis");
+  expect(res.matches).toHaveLength(1);
+  expect(res.matches[0]!.translation).toBe("menulis");
+  expect(res.matches[0]!.prefix).toEqual({ prefix: "n", stem: "tulis" });
+
+  expect(t.translate("nyerat").output).toBe("menulis");
+});
+
+test("an explicit dictionary entry beats prefix reconstruction", () => {
+  // The prefixed form is its own entry with a distinct id
+  const nulisEntry = entry(51, { ngoko: "nulis", krama: "nyerat", inggil: "nyerat" }, ["menulis"]);
+  const t = new Translator({
+    patterns: [
+      { pattern: "tulis", level: "ngoko", entry: tulis },
+      { pattern: "nulis", level: "ngoko", entry: nulisEntry },
+      { pattern: "nyerat", level: "krama", entry: nulisEntry },
+    ],
+    reversePatterns: [
+      { pattern: "tulis", entry: tulis },
+      { pattern: "menulis", entry: nulisEntry },
+    ],
+  });
+
+  const idToJv = t.translate("menulis", { direction: "id-jv", level: "ngoko" });
+  expect(idToJv.matches[0]!.vocabularyId).toBe(51);
+  expect(idToJv.matches[0]!.prefix).toBeUndefined();
+
+  const jvToId = t.translate("nulis");
+  expect(jvToId.matches[0]!.vocabularyId).toBe(51);
+  expect(jvToId.matches[0]!.prefix).toBeUndefined();
+});
+
+test("prefix pass leaves unknown stems untouched", () => {
+  const t = new Translator(prefixDict);
+  expect(t.translate("menggoreng", { direction: "id-jv", level: "ngoko" }).matches).toHaveLength(0);
+  expect(t.translate("ngoyak").matches).toHaveLength(0);
+});
+
+test("all three passes coexist in one sentence", () => {
+  const agama = entry(52, { ngoko: "agama", krama: "agami", inggil: "agami" }, ["agama"]);
+  const t = new Translator({
+    patterns: [
+      { pattern: "tulis", level: "ngoko", entry: tulis },
+      { pattern: "agama", level: "ngoko", entry: agama },
+      { pattern: "abang", level: "ngoko", entry: abang },
+    ],
+    reversePatterns: [
+      { pattern: "tulis", entry: tulis },
+      { pattern: "agama", entry: agama },
+      { pattern: "merah", entry: abang },
+    ],
+  });
+
+  const res = t.translate("menulis agamanya merah", { direction: "id-jv", level: "ngoko" });
+  expect(res.output).toBe("nulis agamane abang");
+  expect(res.matches).toHaveLength(3);
+  expect(res.matches[0]!.prefix).toBeDefined(); // menulis
+  expect(res.matches[1]!.affix).toBeDefined(); // agamanya
+  expect(res.matches[2]!.prefix).toBeUndefined(); // merah, plain
+  expect(res.matches[2]!.affix).toBeUndefined();
+  expect(res.tokens.map((tok) => tok.text).join("")).toBe("menulis agamanya merah");
+});
+
+test("prefix round trip id -> jv -> id", () => {
+  const t = new Translator(prefixDict);
+  const jv = t.translate("menulis", { direction: "id-jv", level: "ngoko" }).output;
+  expect(jv).toBe("nulis");
+  expect(t.translate(jv).output).toBe("menulis");
 });

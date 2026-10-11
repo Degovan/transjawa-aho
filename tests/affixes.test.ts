@@ -1,5 +1,10 @@
 import { test, expect } from "bun:test";
-import { analyzeSuffix, applySuffix, SUFFIX_RULES } from "../src/matcher/affixes";
+import {
+  analyzeJavaneseSuffix,
+  analyzeSuffix,
+  applySuffix,
+  SUFFIX_RULES,
+} from "../src/matcher/affixes";
 
 const known = (...stems: string[]) => (s: string) => stems.includes(s);
 
@@ -76,4 +81,61 @@ test("returns null when the rule has no form for the requested level", () => {
   };
   expect(applySuffix("sega", partial, "ngoko")).toBe("segax");
   expect(applySuffix("sega", partial, "krama")).toBeNull();
+});
+
+// --- jv -> id direction ---
+
+test("reads a bound Javanese suffix and reports the inferred level", () => {
+  const res = analyzeJavaneseSuffix("agamane", [], known("agama"));
+  expect(res).not.toBeNull();
+  expect(res!.stem).toBe("agama");
+  expect(res!.indonesianSuffix).toBe("nya");
+  expect(res!.level).toBe("ngoko");
+  expect(res!.tokenSpan).toBe(1);
+});
+
+test("distinguishes level by affix form", () => {
+  expect(analyzeJavaneseSuffix("agaminipun", [], known("agami"))!.level).toBe("krama");
+  expect(analyzeJavaneseSuffix("agamane", [], known("agama"))!.level).toBe("ngoko");
+});
+
+test("consumes a following pronoun for multi-word affixes", () => {
+  const res = analyzeJavaneseSuffix("agaminipun", ["kula"], known("agami"));
+  expect(res!.indonesianSuffix).toBe("ku");
+  expect(res!.tokenSpan).toBe(2);
+  expect(res!.javaneseAffix).toBe("nipun kula");
+});
+
+test("prefers the multi-word affix over the bare one when the pronoun follows", () => {
+  // "agaminipun kula" must read as "-ku", not as "-nya" followed by junk
+  expect(analyzeJavaneseSuffix("agaminipun", ["kula"], known("agami"))!.indonesianSuffix).toBe(
+    "ku"
+  );
+  // without the pronoun it falls back to "-nya"
+  expect(analyzeJavaneseSuffix("agaminipun", [], known("agami"))!.indonesianSuffix).toBe("nya");
+});
+
+test("sampeyan means krama, panjenengan means inggil", () => {
+  const krama = analyzeJavaneseSuffix("agaminipun", ["sampeyan"], known("agami"))!;
+  expect(krama.indonesianSuffix).toBe("mu");
+  expect(krama.level).toBe("krama");
+
+  const inggil = analyzeJavaneseSuffix("agaminipun", ["panjenengan"], known("agami"))!;
+  expect(inggil.indonesianSuffix).toBe("mu");
+  expect(inggil.level).toBe("inggil");
+});
+
+test("handles consonant-final allomorphs", () => {
+  expect(analyzeJavaneseSuffix("omahe", [], known("omah"))!.stem).toBe("omah");
+  expect(analyzeJavaneseSuffix("dalemipun", ["kula"], known("dalem"))!.stem).toBe("dalem");
+});
+
+test("refuses a split when the leftover Javanese stem is unknown", () => {
+  expect(analyzeJavaneseSuffix("kursine", [], known("agama"))).toBeNull();
+});
+
+test("does not consume a trailing word that is not part of the affix", () => {
+  const res = analyzeJavaneseSuffix("agamane", ["abang"], known("agama"))!;
+  expect(res.tokenSpan).toBe(1);
+  expect(res.indonesianSuffix).toBe("nya");
 });

@@ -1,7 +1,21 @@
 import type { Dictionary, Level, VocabEntry } from "../dictionary/types";
 import { LEVELS } from "../dictionary/types";
 import { AhoCorasick } from "./aho-corasick";
-import { analyzeSuffix, applySuffix, type SuffixRule } from "./affixes";
+import {
+  analyzeJavaneseSuffix,
+  analyzeSuffix,
+  applySuffix,
+  MAX_AFFIX_LOOKAHEAD,
+  type SuffixRule,
+} from "./affixes";
+import {
+  analyzePrefix,
+  applyPrefix,
+  INDONESIAN_PREFIX_FORMS,
+  INDONESIAN_PREFIX_REVERSALS,
+  JAVANESE_PREFIX_FORMS,
+  JAVANESE_PREFIX_REVERSALS,
+} from "./prefixes";
 import { tokenize, type Token } from "./tokenizer";
 
 /** "jv-id" (default): Javanese -> Indonesian. "id-jv": Indonesian -> Javanese. */
@@ -47,6 +61,17 @@ export interface TranslationMatch {
     /** Indonesian suffix removed from the input, e.g. "nya" */
     suffix: string;
     /** the bare Indonesian stem that was looked up */
+    stem: string;
+  };
+  /**
+   * Set when the match came from stripping a verbal prefix (Indonesian `meN-`,
+   * Javanese `ater-ater anuswara`). The dictionary matched `stem` only;
+   * `translation` already carries the re-applied prefix.
+   */
+  prefix?: {
+    /** surface prefix removed from the input, e.g. "men" or "n" */
+    prefix: string;
+    /** the bare stem that was looked up in the dictionary */
     stem: string;
   };
 }
@@ -110,6 +135,89 @@ function javaneseSynonyms(
   return out;
 }
 
+/** A dictionary phrase whose final word can carry an affix. */
+interface StemCandidate {
+  /** the phrase's words, e.g. ["anak", "kedua"] */
+  words: string[];
+  entries: VocabEntry[];
+}
+
+/**
+ * Lookup for affix stripping, keyed by a phrase's LAST word.
+ *
+ * An affix always attaches to the final word of a phrase ("anak kedua" +
+ * "-ku" -> "anak keduaku"), so after stripping the suffix off a token we need
+ * every phrase ending in the leftover stem — not just the single-word entries.
+ * Keying by last word keeps that lookup O(1); candidates then only need their
+ * leading words compared against the tokens before the match.
+ *
+ * Candidates are held longest-phrase-first so the greediest match wins,
+ * mirroring the leftmost-longest rule used by the automaton.
+ */
+class StemIndex {
+  private byLastWord = new Map<string, StemCandidate[]>();
+  /** Single-word patterns only, for prefix reconstruction. */
+  private singleWord = new Map<string, VocabEntry[]>();
+  /** Which level a single-word Javanese pattern came from. */
+  private singleWordLevel = new Map<string, Level>();
+
+  add(words: string[], entry: VocabEntry, level?: Level): void {
+    if (words.length === 0) return;
+
+    if (words.length === 1) {
+      const word = words[0]!;
+      const single = this.singleWord.get(word);
+      if (single) single.push(entry);
+      else this.singleWord.set(word, [entry]);
+      // Keep the first level seen; patterns are added ngoko-first.
+      if (level && !this.singleWordLevel.has(word)) {
+        this.singleWordLevel.set(word, level);
+      }
+    }
+
+    const key = words[words.length - 1]!;
+    const bucket = this.byLastWord.get(key);
+    if (!bucket) {
+      this.byLastWord.set(key, [{ words, entries: [entry] }]);
+      return;
+    }
+    // Merge into the existing candidate when the exact same phrase repeats.
+    const same = bucket.find(
+      (c) => c.words.length === words.length && c.words.every((w, i) => words[i] === w)
+    );
+    if (same) same.entries.push(entry);
+    else {
+      bucket.push({ words, entries: [entry] });
+      bucket.sort((a, b) => b.words.length - a.words.length);
+    }
+  }
+
+  /** True when at least one phrase ends with `stem`. */
+  has(stem: string): boolean {
+    return this.byLastWord.has(stem);
+  }
+
+  /** Every phrase ending with `stem`, longest first. */
+  candidates(stem: string): StemCandidate[] {
+    return this.byLastWord.get(stem) ?? [];
+  }
+
+  /** True when `stem` exists as a standalone single-word pattern. */
+  hasExact(stem: string): boolean {
+    return this.singleWord.has(stem);
+  }
+
+  /** Entries whose pattern is exactly the single word `stem`. */
+  exact(stem: string): VocabEntry[] {
+    return this.singleWord.get(stem) ?? [];
+  }
+
+  /** Level the single-word pattern `stem` was registered under. */
+  levelOf(stem: string): Level | undefined {
+    return this.singleWordLevel.get(stem);
+  }
+}
+
 export class Translator {
   private ac = new AhoCorasick<{ entry: VocabEntry; level: Level }>();
   private reverseAc = new AhoCorasick<{ entry: VocabEntry }>();
@@ -118,25 +226,25 @@ export class Translator {
    * verify an affix-stripped stem is a real dictionary word before accepting
    * the split, and to translate it without re-running the automaton.
    */
-  private reverseStems = new Map<string, VocabEntry[]>();
+  private reverseStems = new StemIndex();
+  /**
+   * Mirror of `reverseStems` for the jv -> id direction, used to verify an
+   * affix-stripped Javanese stem is a real dictionary word.
+   */
+  private forwardStems = new StemIndex();
 
   constructor(dict: Dictionary) {
     for (const p of dict.patterns) {
       const tokens = p.pattern.split(" ");
       this.ac.add(tokens, { entry: p.entry, level: p.level });
+      this.forwardStems.add(tokens, p.entry, p.level);
     }
     this.ac.build();
 
     for (const p of dict.reversePatterns ?? []) {
       const tokens = p.pattern.split(" ");
       this.reverseAc.add(tokens, { entry: p.entry });
-
-      // Affix stripping only ever produces a single-word stem.
-      if (tokens.length === 1) {
-        const bucket = this.reverseStems.get(p.pattern);
-        if (bucket) bucket.push(p.entry);
-        else this.reverseStems.set(p.pattern, [p.entry]);
-      }
+      this.reverseStems.add(tokens, p.entry);
     }
     this.reverseAc.build();
   }
@@ -157,6 +265,7 @@ export class Translator {
     raw.sort((a, b) => a.start - b.start || b.length - a.length);
 
     const chosen: TranslationMatch[] = [];
+    const covered = new Set<number>();
     let consumedUntil = -1;
     for (const m of raw) {
       if (m.start <= consumedUntil) continue;
@@ -173,8 +282,31 @@ export class Translator {
         start: startTok.start,
         end: endTok.end,
       });
+      for (let i = m.start; i <= m.end; i++) covered.add(i);
       consumedUntil = m.end;
     }
+
+    // Second pass, mirroring translateIdToJv: an unmatched token may be an
+    // inflected Javanese form ("agamane"). Strip the affix, translate the bare
+    // stem, then restore the Indonesian suffix.
+    for (let i = 0; i < tokens.length; i++) {
+      if (covered.has(i)) continue;
+      const match = this.matchJavaneseWithAffix(text, tokens, i, covered);
+      if (match) chosen.push(match);
+    }
+
+    // Third pass: verbal prefixes ("nulis" -> "tulis"). Last, so dictionary
+    // entries and suffix forms always take precedence.
+    for (let i = 0; i < tokens.length; i++) {
+      if (covered.has(i)) continue;
+      const prefixMatch = this.matchJvPrefix(tokens[i]!);
+      if (prefixMatch) {
+        chosen.push(prefixMatch);
+        covered.add(i);
+      }
+    }
+
+    chosen.sort((a, b) => a.start - b.start);
 
     return {
       input: text,
@@ -184,11 +316,85 @@ export class Translator {
     };
   }
 
+  /**
+   * Try to translate an inflected Javanese token at `index` by splitting off a
+   * known affix. May consume following tokens when the Javanese affix is
+   * multi-word ("agaminipun kula"), marking them covered so they are not
+   * revisited.
+   */
+  private matchJavaneseWithAffix(
+    text: string,
+    tokens: Token[],
+    index: number,
+    covered: Set<number>
+  ): TranslationMatch | null {
+    const tok = tokens[index]!;
+    // Only look ahead as far as the longest affix form actually needs. Slicing
+    // the whole remainder here would make the pass O(n^2) on long inputs.
+    const nextWords: string[] = [];
+    const lookahead = Math.min(index + 1 + MAX_AFFIX_LOOKAHEAD, tokens.length);
+    for (let i = index + 1; i < lookahead; i++) nextWords.push(tokens[i]!.norm);
+
+    const analysis = analyzeJavaneseSuffix(tok.norm, nextWords, (stem) =>
+      this.forwardStems.has(stem)
+    );
+    if (!analysis) return null;
+
+    // Bail out if the multi-word affix form would swallow an already-matched
+    // token, or run past the end of the input.
+    for (let i = index; i < index + analysis.tokenSpan; i++) {
+      if (i >= tokens.length) return null;
+      if (i !== index && covered.has(i)) return null;
+    }
+
+    // The stem may be the tail of a phrase ("anak keduane"), so match the words
+    // before it as well.
+    const phrase = this.resolvePhrase(
+      this.forwardStems.candidates(analysis.stem),
+      tokens,
+      index,
+      covered
+    );
+    if (!phrase) return null;
+
+    const meanings = phrase.entries[0]!.meanings;
+    if (meanings.length === 0) return null;
+
+    const startTok = tokens[phrase.startIndex]!;
+    const endTok = tokens[index + analysis.tokenSpan - 1]!;
+    const suffix = analysis.indonesianSuffix;
+
+    for (let i = phrase.startIndex; i < index + analysis.tokenSpan; i++) covered.add(i);
+
+    return {
+      // slice from the original text so inner spacing is preserved verbatim
+      source: text.slice(startTok.start, endTok.end),
+      translation: meanings[0]! + suffix,
+      meanings: meanings.map((m) => m + suffix),
+      level: analysis.level,
+      type: phrase.entries[0]!.type,
+      vocabularyId: phrase.entries[0]!.vocabularyId,
+      start: startTok.start,
+      end: endTok.end,
+      affix: { suffix: analysis.javaneseAffix, stem: phrase.words.join(" ") },
+    };
+  }
+
   private translateIdToJv(text: string, level: Level): TranslateResult {
     const tokens = tokenize(text);
     const raw = this.reverseAc.search(tokens.map((t) => t.norm));
 
     raw.sort((a, b) => a.start - b.start || b.length - a.length);
+
+    // Group entries by span up front. Scanning `raw` inside the loop instead
+    // would be O(matches x raw), which gets expensive on synonym-heavy input.
+    const bySpan = new Map<string, VocabEntry[]>();
+    for (const m of raw) {
+      const key = `${m.start}:${m.end}`;
+      const bucket = bySpan.get(key);
+      if (bucket) bucket.push(m.payload.entry);
+      else bySpan.set(key, [m.payload.entry]);
+    }
 
     const chosen: TranslationMatch[] = [];
     const covered = new Set<number>();
@@ -204,11 +410,9 @@ export class Translator {
       );
       const finalTranslation = translation ?? source;
 
-      // Other vocabulary entries matching this exact same span are synonyms.
-      // Render them at `resolvedLevel` so the list stays in one register.
-      const synonymEntries = raw
-        .filter((o) => o.start === m.start && o.end === m.end)
-        .map((o) => o.payload.entry);
+      // Entries matching this exact same span are synonyms. Render them at
+      // `resolvedLevel` so the list stays in one register.
+      const synonymEntries = bySpan.get(`${m.start}:${m.end}`)!;
 
       chosen.push({
         source,
@@ -232,12 +436,22 @@ export class Translator {
     // then re-attach the Javanese affix for this level.
     for (let i = 0; i < tokens.length; i++) {
       if (covered.has(i)) continue;
-      const tok = tokens[i]!;
-      const affixMatch = this.matchWithAffix(tok, level);
+      const affixMatch = this.matchWithAffix(text, tokens, i, covered, level);
       if (affixMatch) chosen.push(affixMatch);
     }
 
-    // rebuild()/segment() walk matches left to right, so restore input order.
+    // Third pass: still unmatched tokens may carry a verbal prefix
+    // ("menulis" -> "tulis"). Runs last so dictionary entries and suffix forms
+    // always win over prefix reconstruction.
+    for (let i = 0; i < tokens.length; i++) {
+      if (covered.has(i)) continue;
+      const prefixMatch = this.matchIdPrefix(tokens[i]!, level);
+      if (prefixMatch) {
+        chosen.push(prefixMatch);
+        covered.add(i);
+      }
+    }
+
     chosen.sort((a, b) => a.start - b.start);
 
     return {
@@ -249,16 +463,79 @@ export class Translator {
   }
 
   /**
-   * Try to translate a single inflected token by splitting off a known affix.
-   * Returns null when the token has no recognizable affix, when the leftover
-   * stem is not in the dictionary, or when the affix has no form at `level`.
+   * Try to translate an inflected token at `index` by splitting off a known
+   * affix. The stripped stem may be the tail of a multi-word phrase ("anak
+   * keduaku" -> "anak kedua" + "-ku"), so preceding tokens are matched too.
+   *
+   * Returns null when the token has no recognizable affix, when no dictionary
+   * phrase ends with the leftover stem, or when the affix has no form at
+   * `level`.
    */
-  private matchWithAffix(tok: Token, level: Level): TranslationMatch | null {
+  private matchWithAffix(
+    text: string,
+    tokens: Token[],
+    index: number,
+    covered: Set<number>,
+    level: Level
+  ): TranslationMatch | null {
+    const tok = tokens[index]!;
     const analysis = analyzeSuffix(tok.norm, (stem) => this.reverseStems.has(stem));
     if (!analysis) return null;
 
-    const entries = this.reverseStems.get(analysis.stem);
-    if (!entries || entries.length === 0) return null;
+    const phrase = this.resolvePhrase(
+      this.reverseStems.candidates(analysis.stem),
+      tokens,
+      index,
+      covered
+    );
+    if (!phrase) return null;
+
+    const { value: stemTranslation, level: resolvedLevel } = resolveLevel(
+      phrase.entries[0]!.levels,
+      level
+    );
+    if (stemTranslation === null) return null;
+
+    const translation = applySuffix(stemTranslation, analysis.rule, resolvedLevel);
+    // No suffix form in this register (e.g. a rule with no krama entry).
+    if (translation === null) return null;
+
+    const meanings = javaneseSynonyms(phrase.entries, resolvedLevel, stemTranslation)
+      .map((form) => applySuffix(form, analysis.rule, resolvedLevel))
+      .filter((form): form is string => form !== null);
+
+    for (let i = phrase.startIndex; i <= index; i++) covered.add(i);
+
+    const startTok = tokens[phrase.startIndex]!;
+    return {
+      source: text.slice(startTok.start, tok.end),
+      translation,
+      meanings,
+      level: resolvedLevel,
+      type: phrase.entries[0]!.type,
+      vocabularyId: phrase.entries[0]!.vocabularyId,
+      start: startTok.start,
+      end: tok.end,
+      affix: { suffix: analysis.rule.suffix, stem: phrase.words.join(" ") },
+    };
+  }
+
+  /**
+   * id -> jv: translate a prefixed Indonesian verb by reconstructing its stem
+   * ("menulis" -> "tulis"), translating that, then applying the Javanese
+   * `ater-ater` to the result ("tulis" -> "nulis").
+   *
+   * Only single-word stems are considered: a verbal prefix attaches to one
+   * word, not to the head of a phrase.
+   */
+  private matchIdPrefix(tok: Token, level: Level): TranslationMatch | null {
+    const analysis = analyzePrefix(tok.norm, INDONESIAN_PREFIX_REVERSALS, (stem) =>
+      this.reverseStems.hasExact(stem)
+    );
+    if (!analysis) return null;
+
+    const entries = this.reverseStems.exact(analysis.stem);
+    if (entries.length === 0) return null;
 
     const { value: stemTranslation, level: resolvedLevel } = resolveLevel(
       entries[0]!.levels,
@@ -266,25 +543,91 @@ export class Translator {
     );
     if (stemTranslation === null) return null;
 
-    const translation = applySuffix(stemTranslation, analysis.rule, resolvedLevel);
-    // No suffix form in this register (e.g. krama has no bound "-ku").
+    // `ater-ater` is register-neutral, so the same nasal prefix applies at
+    // every level; the level only decides which stem column we started from.
+    const translation = applyPrefix(stemTranslation, JAVANESE_PREFIX_FORMS);
     if (translation === null) return null;
 
     const meanings = javaneseSynonyms(entries, resolvedLevel, stemTranslation)
-      .map((form) => applySuffix(form, analysis.rule, resolvedLevel))
+      .map((form) => applyPrefix(form, JAVANESE_PREFIX_FORMS))
       .filter((form): form is string => form !== null);
 
     return {
       source: tok.raw,
       translation,
-      meanings,
+      meanings: meanings.length > 0 ? meanings : [translation],
       level: resolvedLevel,
       type: entries[0]!.type,
       vocabularyId: entries[0]!.vocabularyId,
       start: tok.start,
       end: tok.end,
-      affix: { suffix: analysis.rule.suffix, stem: analysis.stem },
+      prefix: { prefix: analysis.prefix, stem: analysis.stem },
     };
+  }
+
+  /**
+   * jv -> id: mirror of `matchIdPrefix`. Reconstructs the Javanese stem
+   * ("nulis" -> "tulis"), translates it, then applies Indonesian `meN-`.
+   */
+  private matchJvPrefix(tok: Token): TranslationMatch | null {
+    const analysis = analyzePrefix(tok.norm, JAVANESE_PREFIX_REVERSALS, (stem) =>
+      this.forwardStems.hasExact(stem)
+    );
+    if (!analysis) return null;
+
+    const entries = this.forwardStems.exact(analysis.stem);
+    if (entries.length === 0) return null;
+
+    const meanings = entries[0]!.meanings;
+    if (meanings.length === 0) return null;
+
+    const prefixed = meanings
+      .map((m) => applyPrefix(m, INDONESIAN_PREFIX_FORMS))
+      .filter((m): m is string => m !== null);
+    if (prefixed.length === 0) return null;
+
+    return {
+      source: tok.raw,
+      translation: prefixed[0]!,
+      meanings: prefixed,
+      // The stem's own level; ater-ater carries no register information.
+      level: this.forwardStems.levelOf(analysis.stem) ?? "ngoko",
+      type: entries[0]!.type,
+      vocabularyId: entries[0]!.vocabularyId,
+      start: tok.start,
+      end: tok.end,
+      prefix: { prefix: analysis.prefix, stem: analysis.stem },
+    };
+  }
+
+  /**
+   * Pick the longest candidate phrase whose leading words match the tokens
+   * immediately before `endIndex`. Candidates arrive longest-first, so the
+   * first fit wins. Tokens already consumed by another match disqualify a
+   * candidate.
+   */
+  private resolvePhrase(
+    candidates: StemCandidate[],
+    tokens: Token[],
+    endIndex: number,
+    covered: Set<number>
+  ): (StemCandidate & { startIndex: number }) | null {
+    for (const candidate of candidates) {
+      const leading = candidate.words.slice(0, -1);
+      const startIndex = endIndex - leading.length;
+      if (startIndex < 0) continue;
+
+      let fits = true;
+      for (let i = 0; i < leading.length; i++) {
+        const at = startIndex + i;
+        if (covered.has(at) || tokens[at]!.norm !== leading[i]) {
+          fits = false;
+          break;
+        }
+      }
+      if (fits) return { ...candidate, startIndex };
+    }
+    return null;
   }
 
   /** Rebuild the string, replacing matched spans with their primary meaning. */

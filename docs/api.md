@@ -16,7 +16,7 @@ Request minimal:
 |---|---|---|---|
 | `text` | ya | — | Teks yang diterjemahkan. |
 | `direction` | tidak | `"jv-id"` | `"jv-id"` = Jawa → Indonesia. `"id-jv"` = Indonesia → Jawa. |
-| `level` | tidak | `"ngoko"` | Hanya dipakai saat `direction: "id-jv"`. Tingkatan Jawa yang jadi hasil: `ngoko`, `krama`, atau `inggil`. |
+| `level` | tidak | `"ngoko"` | Hanya dipakai saat `direction: "id-jv"`. Tingkatan Jawa yang jadi hasil: `ngoko`, `krama`, atau `inggil`. Untuk `jv-id` field ini diabaikan, karena tingkatan input dideteksi sendiri dari kata dan bentuk imbuhannya. |
 
 Nilai `direction` atau `level` di luar daftar di atas ditolak dengan HTTP 400. Request lama yang hanya mengirim `text` tetap jalan seperti sebelumnya.
 
@@ -36,11 +36,12 @@ Field di dalam tiap item `matches`:
 | `source` | Potongan teks asli persis seperti di input, termasuk kapitalisasinya. |
 | `translation` | Terjemahan yang dipakai di `output`. |
 | `meanings` | Alternatif terjemahan di bahasa **output**, `translation` selalu di posisi pertama. Detail di bawah. |
-| `level` | Untuk `jv-id`: tingkatan asal kata yang cocok. Untuk `id-jv`: tingkatan yang benar-benar dipakai untuk `translation` (bisa beda dari yang diminta, lihat fallback di bawah). |
+| `level` | Untuk `jv-id`: tingkatan asal kata yang cocok — kalau hasil pelepasan imbuhan, tingkatan yang disimpulkan dari bentuk imbuhannya. Untuk `id-jv`: tingkatan yang benar-benar dipakai untuk `translation` (bisa beda dari yang diminta, lihat fallback di bawah). |
 | `type` | Jenis kata dari kolom `type` tabel `vocabularies`, bisa `null`. |
 | `vocabularyId` | ID entry vocabulary asalnya. |
 | `start` / `end` | Offset karakter di `input`. |
-| `affix` | Opsional, hanya untuk `id-jv` saat hasil berasal dari pelepasan imbuhan. Lihat [imbuhan.md](imbuhan.md). |
+| `affix` | Opsional, ada saat hasil berasal dari pelepasan imbuhan akhir (berlaku di kedua arah). `affix.suffix` adalah imbuhan yang dilepas dari input, `affix.stem` kata dasarnya. Lihat [imbuhan.md](imbuhan.md). |
+| `prefix` | Opsional, ada saat hasil berasal dari rekonstruksi awalan `meN-` / `ater-ater`. `prefix.prefix` awalan yang dilepas, `prefix.stem` kata dasarnya. Lihat [awalan.md](awalan.md). Satu match tidak pernah punya `affix` dan `prefix` sekaligus. |
 
 ### Contoh: Jawa → Indonesia
 
